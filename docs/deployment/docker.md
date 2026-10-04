@@ -130,6 +130,20 @@ site calls the API under its own origin (`NEXT_PUBLIC_BASE_API_URL=/api`) and fo
 to `API_INTERNAL_URL` itself when no proxy does. The site of a given tag documents that tag;
 the word pages are rendered on request and cached for an hour.
 
+Compose waits for the server's `/api/ready` probe before starting the site, including
+migrations and the automatic first-start import. The admin UI can start earlier, so the
+operator can inspect a failed import. The readiness healthcheck allows up to 30 minutes
+of startup grace for a fresh dictionary download; a successful probe releases the site
+immediately. This controls startup order, not uninterrupted availability during an update:
+an already-running site can still see an API restart.
+
+Word-page API reads retry one network failure or `502`/`503`/`504` after one second, and
+honour a short `Retry-After` (up to five seconds, also for `429`). The retry makes a fresh
+request even within the same render. If the word still cannot be read, the page answers
+`500` without caching that failure. The site logs `dictionary_api_unavailable` with the
+API status, `request_id` and `retry_after`, or the connection error code. Compare it with
+`docker compose logs --since 10m server site`; tokens and response bodies are not logged.
+
 `INTERNAL_API_TOKEN` is a secret the two containers share (both read `.env`): the site's
 server-side requests to the API — a word page being rendered, the daily walk of
 `GET /api/v1/words` behind its sitemaps and `/word/browse` — carry it and are not counted against
@@ -289,8 +303,10 @@ The packages live at <https://github.com/Fristail27?tab=packages>.
   `NODE_ENV=production`). Fields, `jq` recipes and shipping them to a collector:
   [`../observability.md`](../observability.md#logs).
 - **Probes**: `GET /api/health` and `GET /api/ready` ([`README.md`](./README.md#probes)). The
-  compose healthchecks use the liveness one, so a container with an unreachable database stays
-  up (restarting it would not help) and reports `503` on `/api/ready`.
+  server image checks liveness by default; Compose overrides this with readiness to gate
+  website startup. An unreachable database makes the server unhealthy without restarting
+  it (Docker's restart policy does not restart a running unhealthy container). The frontend
+  and site healthchecks still check their own pages.
 - **Metrics with dashboards**: `docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d`
   adds a local Prometheus + Grafana with a provisioned dashboard and alert rules — the files
   it needs and the whole stack in one place: [Everything together](#everything-together);

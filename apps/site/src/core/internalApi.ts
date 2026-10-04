@@ -19,6 +19,8 @@ export const internalApiHeaders = (
 
 /** A page render waits this long at most for the budget to free (`Retry-After`) */
 export const RETRY_429_MAX_WAIT_MS = 5_000;
+/** One short pause for a restarting API or reverse proxy */
+export const TRANSIENT_RETRY_WAIT_MS = 1_000;
 
 /** The wait a `429` asks for, in ms; null when it is missing, malformed or too long to wait in a render */
 export const retryAfterWithin = (res: Response, maxMs: number = RETRY_429_MAX_WAIT_MS): number | null => {
@@ -34,20 +36,36 @@ const defaultSleep = (ms: number): Promise<void> =>
   });
 
 /**
- * A GET that is repeated once after a `429` when the server says the budget
- * frees within a few seconds: a page rendered while the budget is briefly
- * exhausted (the token not configured, a crawler burst) should not fail for
- * that. A longer `Retry-After` is not waited for — the caller answers as if
- * the API were unavailable, without a page that takes a minute to fail
+ * Repeat a GET once after a network failure, 502/503/504 or a brief 429.
+ * Respect Retry-After without making a render wait a minute. The callback
+ * must pass the retry's signal to fetch: Next otherwise memoizes the first
+ * failure within this render and no second request reaches the API. This
+ * opts out of request memoization, not the persistent fetch data cache.
  */
 export const getWithOneRetry = async (
-  get: () => Promise<Response>,
+  get: (signal?: AbortSignal) => Promise<Response>,
   sleep: (ms: number) => Promise<void> = defaultSleep,
 ): Promise<Response> => {
-  const first = await get();
-  if (first.status !== 429) return first;
-  const wait = retryAfterWithin(first);
+  let first: Response;
+  try {
+    first = await get();
+  } catch (error) {
+    // Native fetch wraps transport errors (connection refused/reset, DNS,
+    // undici timeouts) in this TypeError. Programming errors are not retried.
+    if (!(error instanceof TypeError) || error.message !== 'fetch failed') throw error;
+    await sleep(TRANSIENT_RETRY_WAIT_MS);
+    return get(new AbortController().signal);
+  }
+  if (![429, 502, 503, 504].includes(first.status)) return first;
+  const wait =
+    first.status === 429 || first.headers.has('retry-after')
+      ? retryAfterWithin(first)
+      : TRANSIENT_RETRY_WAIT_MS;
   if (wait === null) return first;
+  // Next may have cloned this response for request memoization. Cancelling
+  // one branch of a tee waits for the other branch, which may never be read.
+  // Release our body without letting that wait prevent the retry.
+  void first.body?.cancel().catch(() => undefined);
   await sleep(wait);
-  return get();
+  return get(new AbortController().signal);
 };

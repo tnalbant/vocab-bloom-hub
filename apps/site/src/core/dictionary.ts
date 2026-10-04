@@ -19,10 +19,24 @@ import { getWithOneRetry, internalApiHeaders } from './internalApi';
 // for often once it is indexed
 const REVALIDATE_SECONDS = 3600;
 
+// Keep enough detail to correlate a failed render with the API request log,
+// without logging the internal token, response body or connection URL.
+const logHeadwordFailure = (path: string, details: Record<string, unknown>): void => {
+  // eslint-disable-next-line no-console -- server-side diagnostics for the operator
+  console.warn(
+    JSON.stringify({
+      event: 'dictionary_api_unavailable',
+      path,
+      internal_token_configured: Boolean(process.env.INTERNAL_API_TOKEN?.trim()),
+      ...details,
+    }),
+  );
+};
+
 /**
  * Thrown by a page that cannot be rendered without the API (issue #480): the
- * route-level error boundary shows it and Next answers 500 with no-store, so
- * neither a crawler nor a cache keeps a placeholder for a page that exists
+ * route-level error boundary shows it and Next answers 500. The failed
+ * render is not kept as a successful or missing page in the ISR cache.
  */
 export class DictionaryUnavailableError extends Error {
   constructor() {
@@ -36,20 +50,34 @@ export type HeadwordResultT =
 
 /** GET /api/v1/words/{word}: every entry of a headword, or why there is none */
 export const fetchHeadword = async (word: string): Promise<HeadwordResultT> => {
+  const path = `/v1/words/${encodeURIComponent(word)}`;
   try {
     // the site's own traffic (internalApi.ts): not counted against the public
-    // budget with INTERNAL_API_TOKEN set, and a brief 429 is retried once
-    const res = await getWithOneRetry(() =>
-      fetch(`${serverApiBase()}/v1/words/${encodeURIComponent(word)}`, {
+    // budget with INTERNAL_API_TOKEN set; transient failures get one retry
+    const res = await getWithOneRetry((signal) =>
+      fetch(`${serverApiBase()}${path}`, {
         headers: internalApiHeaders(),
         next: { revalidate: REVALIDATE_SECONDS },
+        signal,
       }),
     );
     if (res.status === 404) return { kind: 'not_found' };
-    if (!res.ok) return { kind: 'unavailable' };
+    if (!res.ok) {
+      logHeadwordFailure(path, {
+        status: res.status,
+        request_id: res.headers.get('x-request-id'),
+        retry_after: res.headers.get('retry-after'),
+      });
+      return { kind: 'unavailable' };
+    }
 
     return { kind: 'found', result: (await res.json()) as PublicHeadwordV1ResT };
-  } catch {
+  } catch (error) {
+    const cause = error instanceof Error ? error.cause : undefined;
+    logHeadwordFailure(path, {
+      error: error instanceof Error ? error.name : 'UnknownError',
+      code: cause && typeof cause === 'object' && 'code' in cause ? cause.code : undefined,
+    });
     return { kind: 'unavailable' };
   }
 };
@@ -61,10 +89,11 @@ export const fetchHeadword = async (word: string): Promise<HeadwordResultT> => {
  */
 export const fetchHeadwordHistory = async (word: string): Promise<PublicChangeV1T[]> => {
   try {
-    const res = await getWithOneRetry(() =>
+    const res = await getWithOneRetry((signal) =>
       fetch(`${serverApiBase()}/v1/words/${encodeURIComponent(word)}/history`, {
         headers: internalApiHeaders(),
         next: { revalidate: REVALIDATE_SECONDS },
+        signal,
       }),
     );
     if (!res.ok) return [];
@@ -83,10 +112,11 @@ export const fetchHeadwordHistory = async (word: string): Promise<PublicChangeV1
  */
 export const fetchHeadwordDatasets = async (word: string): Promise<PublicWordDatasetV1T[]> => {
   try {
-    const res = await getWithOneRetry(() =>
+    const res = await getWithOneRetry((signal) =>
       fetch(`${serverApiBase()}/v1/words/${encodeURIComponent(word)}/datasets`, {
         headers: internalApiHeaders(),
         next: { revalidate: REVALIDATE_SECONDS },
+        signal,
       }),
     );
     if (!res.ok) return [];
@@ -100,10 +130,10 @@ export const fetchHeadwordDatasets = async (word: string): Promise<PublicWordDat
 /** GET /api/v1/words/{word}/datasets/{dataset}/history: the history read of a dataset that is not the served one */
 export const fetchDatasetHistory = async (word: string, dataset: string): Promise<PublicChangeV1T[]> => {
   try {
-    const res = await getWithOneRetry(() =>
+    const res = await getWithOneRetry((signal) =>
       fetch(
         `${serverApiBase()}/v1/words/${encodeURIComponent(word)}/datasets/${encodeURIComponent(dataset)}/history`,
-        { headers: internalApiHeaders(), next: { revalidate: REVALIDATE_SECONDS } },
+        { headers: internalApiHeaders(), next: { revalidate: REVALIDATE_SECONDS }, signal },
       ),
     );
     if (!res.ok) return [];
@@ -132,10 +162,11 @@ export const fetchRandomWord = async (): Promise<string | null> => {
 /** GET /api/v1/meta, reduced to the terms of the data; the project's own when the API does not say */
 export const fetchDatasetTerms = async (): Promise<DatasetTermsT> => {
   try {
-    const res = await getWithOneRetry(() =>
+    const res = await getWithOneRetry((signal) =>
       fetch(`${serverApiBase()}/v1/meta`, {
         headers: internalApiHeaders(),
         next: { revalidate: REVALIDATE_SECONDS },
+        signal,
       }),
     );
     if (!res.ok) return OWN_DATASET_TERMS;

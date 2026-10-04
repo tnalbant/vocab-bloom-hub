@@ -11,6 +11,10 @@ import http from 'node:http';
 const [port, api] = process.argv.slice(2);
 if (!port || !api) throw new Error('usage: node site-datasets-stub.mjs <port> <the URL of the API>');
 
+// Controlled API failures for the production SSR recovery tests. Each test
+// uses a distinct spelling, so an earlier ISR page cannot hide the failure.
+const failures = new Map();
+
 const SECOND_DATASET = {
   dataset: 'wordnet',
   active: false,
@@ -121,7 +125,56 @@ const forward = async (req, res) => {
 http
   .createServer(async (req, res) => {
     try {
-      const word = /^\/api\/v1\/words\/([^/]+)\/datasets$/.exec(new URL(req.url, 'http://stub').pathname)?.[1];
+      const path = new URL(req.url, 'http://stub').pathname;
+      const control = /^\/api\/__test__\/word-failure\/([^/]+)$/.exec(path)?.[1];
+      if (control) {
+        if (req.method === 'POST') {
+          failures.set(control, { remaining: JSON.parse(await bodyOf(req)), calls: 0 });
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(failures.get(control)));
+        return;
+      }
+      const faultWord = /^\/api\/v1\/words\/([^/]+)(?:\/(datasets|history))?$/.exec(path);
+      const scenario = faultWord && failures.get(faultWord[1]);
+      if (req.method === 'GET' && scenario) {
+        const [, spelling, suffix] = faultWord;
+        if (!suffix) {
+          scenario.calls++;
+          const failure = scenario.remaining.shift();
+          if (failure === 'disconnect') {
+            req.socket.destroy();
+            return;
+          }
+          if (failure) {
+            res.writeHead(failure, {
+              'content-type': 'application/json',
+              'x-request-id': `test-${spelling}-${scenario.calls}`,
+              ...(failure === 429 ? { 'retry-after': '1' } : {}),
+            });
+            res.end(JSON.stringify({ error: 'temporarily unavailable' }));
+            return;
+          }
+        }
+        const { body } = await json(`/v1/words/run${suffix ? `/${suffix}` : ''}`);
+        body.meta.word = spelling;
+        if (suffix === 'datasets') {
+          body.data.forEach((group) => {
+            group.word = spelling;
+            group.entries.forEach((entry) => {
+              entry.word = spelling;
+            });
+          });
+        } else if (suffix !== 'history') {
+          body.data.forEach((entry) => {
+            entry.word = spelling;
+          });
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(body));
+        return;
+      }
+      const word = /^\/api\/v1\/words\/([^/]+)\/datasets$/.exec(path)?.[1];
       if (req.method === 'GET' && word && headwordOf(word) in SECOND_DATASET_WORDS) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify(await datasetsOf(headwordOf(word))));

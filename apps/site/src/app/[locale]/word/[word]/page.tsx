@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { cache } from 'react';
 import type { Metadata } from 'next';
 import { notFound, permanentRedirect } from 'next/navigation';
 import { getTranslations, setRequestLocale } from 'next-intl/server';
@@ -68,7 +68,8 @@ type ResolvedT =
  * so its tab can be opened, and names the page of the first tab as its
  * canonical
  */
-const resolve = async (locale: string, word: string): Promise<ResolvedT> => {
+// Share the result (including its retry) between metadata and the page.
+const resolve = cache(async (locale: string, word: string): Promise<ResolvedT> => {
   const [headword, terms, groups] = await Promise.all([
     fetchHeadword(word),
     fetchDatasetTerms(),
@@ -82,7 +83,7 @@ const resolve = async (locale: string, word: string): Promise<ResolvedT> => {
   if (!panels.some((panel) => panel.word === word)) permanentRedirect(`/${locale}${wordPath(lead.word)}`);
 
   return { kind: 'found', panels, lead };
-};
+});
 
 // how many of the locale's translations fit a title
 const TITLE_TRANSLATIONS = 4;

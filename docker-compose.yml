@@ -68,6 +68,15 @@ services:
     # is restarted here — a bundled Postgres is ready long before.
     # SIGTERM → the server drains its requests for up to SHUTDOWN_TIMEOUT (30 s)
     stop_grace_period: 45s
+    # Compose uses readiness to hold back the website until migrations and
+    # the first-start import finish. A successful probe ends the grace period
+    # immediately; a fresh instance may need time to download its dictionary.
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- "http://127.0.0.1:3010/api/ready" >/dev/null || exit 1']
+      interval: 5s
+      timeout: 5s
+      start_period: 30m
+      retries: 12
     restart: unless-stopped
 
   frontend:
@@ -101,7 +110,7 @@ services:
       - '127.0.0.1:${SITE_PORT:-3242}:3020'
     depends_on:
       server:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
